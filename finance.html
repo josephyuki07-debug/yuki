@@ -3825,13 +3825,18 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 
     function showConfirm(receipt, dataUrl) {
       hide(busyEl); hide(errorEl); hide(dropEl);
-      if (receipt.is_receipt === false) {
-        showError("That doesn't look like a receipt. Try a clearer photo of a bill or receipt.");
+      // /api/receipt sets readable:false only when there's no legible amount
+      // anywhere (older builds used is_receipt — keep both for safety).
+      if (receipt.readable === false || receipt.is_receipt === false) {
+        showError("Couldn't read an amount from that image. Try a clearer, well-lit photo or screenshot.");
         return;
       }
       confThumb.src = dataUrl;
-      merchantEl.value = String(receipt.merchant || '').trim();
-      const total = Number(receipt.total) || 0;
+      // The API returns `source` (bank / merchant name) and `amount` (the
+      // headline figure — a balance on a banking screen, or a receipt total).
+      // Fall back to the legacy merchant/total names so old responses still work.
+      merchantEl.value = String(receipt.source || receipt.merchant || '').trim();
+      const total = Number(receipt.amount != null ? receipt.amount : receipt.total) || 0;
       totalEl.value = total ? String(total) : '';
       let ccy = String(receipt.currency || '').toUpperCase();
       if (!VALID_CCY.includes(ccy)) ccy = (currencyEl && currencyEl.value) || 'CHF';
@@ -3840,13 +3845,15 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 
       fillAccounts();
 
-      // Line items, best effort
+      // Line items, best effort. The API returns items as { name, amount };
+      // older responses used { name, price }.
       const items = Array.isArray(receipt.items) ? receipt.items : [];
       if (items.length) {
-        itemsEl.innerHTML = items.slice(0, 20).map(it =>
-          '<div class="rcpt-item"><span>' + escapeHtml(String(it.name || '')) + '</span>'
-          + '<span>' + (Number(it.price) ? Number(it.price).toFixed(2) : '') + '</span></div>'
-        ).join('');
+        itemsEl.innerHTML = items.slice(0, 20).map(it => {
+          const price = Number(it.amount != null ? it.amount : it.price);
+          return '<div class="rcpt-item"><span>' + escapeHtml(String(it.name || '')) + '</span>'
+            + '<span>' + (price ? price.toFixed(2) : '') + '</span></div>';
+        }).join('');
         show(itemsEl);
       } else {
         itemsEl.innerHTML = ''; hide(itemsEl);
