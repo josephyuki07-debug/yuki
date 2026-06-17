@@ -1773,7 +1773,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
           <span class="rcpt-emoji">🧾</span>
           <div>
             <div class="rcpt-t">Scan a receipt</div>
-            <div class="rcpt-s">Drag a photo in — AI reads it and deducts it</div>
+            <div class="rcpt-s">Drag a photo in — a receipt to deduct, or a balance to set</div>
           </div>
         </div>
       </div>
@@ -3742,9 +3742,13 @@ input[type="date"]::-webkit-calendar-picker-indicator {
     const applyBtn   = document.getElementById('rcptApply');
     const discardBtn = document.getElementById('rcptDiscard');
 
+    const accountLabel = card.querySelector('label[for="rcptAccount"]');
     const ACCT_ICONS = { bank: '🏦', stocks: '📈', crypto: '🪙', other: '💼' };
     const VALID_CCY  = ['CHF', 'USD', 'EUR', 'GBP'];
     let receiptDate  = '';
+    // 'balance' = the image shows a current account balance (set the account to
+    // it); anything else (expense / receipt) = deduct it. Driven by api/receipt.js.
+    let receiptKind  = '';
 
     function show(el)  { el.classList.remove('hidden'); }
     function hide(el)  { el.classList.add('hidden'); }
@@ -3753,6 +3757,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
       show(dropEl); hide(busyEl); hide(errorEl); hide(confirmEl);
       fileEl.value = '';
       receiptDate = '';
+      receiptKind = '';
     }
     function showError(msg) {
       hide(busyEl); hide(confirmEl); show(dropEl);
@@ -3785,10 +3790,24 @@ input[type="date"]::-webkit-calendar-picker-indicator {
       return { dataUrl, base64: dataUrl.split(',')[1] || '', mediaType: 'image/jpeg' };
     }
 
-    function fillAccounts() {
+    function fillAccounts(isBalance, merchantName) {
       const accounts = listAllNwAccounts();
       accountEl.innerHTML = '';
-      if (!accounts.length) {
+      // A balance can populate a brand-new account, so offer that even when the
+      // user has none yet — that's exactly the first-run case.
+      if (isBalance) {
+        const o = document.createElement('option');
+        o.value = '__new__';
+        o.textContent = '➕ New account' + (merchantName ? ' · ' + merchantName : '');
+        accountEl.appendChild(o);
+      }
+      accounts.forEach(a => {
+        const o = document.createElement('option');
+        o.value = a.catKey + '::' + a.itemName;
+        o.textContent = (ACCT_ICONS[a.catKey] || '') + ' ' + a.itemName + ' · ' + fmtMoney(a.amountCHF);
+        accountEl.appendChild(o);
+      });
+      if (!accountEl.options.length) {
         const o = document.createElement('option');
         o.value = ''; o.textContent = 'No accounts yet — add one first';
         accountEl.appendChild(o);
@@ -3796,12 +3815,6 @@ input[type="date"]::-webkit-calendar-picker-indicator {
         return false;
       }
       accountEl.disabled = false;
-      accounts.forEach(a => {
-        const o = document.createElement('option');
-        o.value = a.catKey + '::' + a.itemName;
-        o.textContent = (ACCT_ICONS[a.catKey] || '') + ' ' + a.itemName + ' · ' + fmtMoney(a.amountCHF);
-        accountEl.appendChild(o);
-      });
       return true;
     }
 
@@ -3819,7 +3832,19 @@ input[type="date"]::-webkit-calendar-picker-indicator {
         return;
       }
       const totalCHF = total / rate;
-      hintEl.textContent = datePart + 'Deducts ' + fmtMoney(totalCHF) + ' from your net worth.';
+      if (receiptKind === 'balance') {
+        // A balance is the money you currently have — set the account to it,
+        // don't subtract it.
+        if (accountEl.value === '__new__') {
+          const nm = merchantEl.value.trim() || 'New account';
+          hintEl.textContent = datePart + 'Creates "' + nm + '" holding ' + fmtMoney(totalCHF) + '.';
+        } else {
+          const nm = (accountEl.value.split('::')[1] || 'this account');
+          hintEl.textContent = datePart + 'Sets ' + nm + ' to ' + fmtMoney(totalCHF) + '.';
+        }
+      } else {
+        hintEl.textContent = datePart + 'Deducts ' + fmtMoney(totalCHF) + ' from your net worth.';
+      }
       applyBtn.disabled = accountEl.disabled;
     }
 
@@ -3832,9 +3857,11 @@ input[type="date"]::-webkit-calendar-picker-indicator {
         return;
       }
       confThumb.src = dataUrl;
-      // The API returns `source` (bank / merchant name) and `amount` (the
-      // headline figure — a balance on a banking screen, or a receipt total).
-      // Fall back to the legacy merchant/total names so old responses still work.
+      // The API returns `kind` (balance vs expense/income), `source` (bank /
+      // merchant name) and `amount` (the headline figure — a balance on a
+      // banking screen, or a receipt total). Fall back to the legacy
+      // merchant/total names so old responses still work.
+      receiptKind = String(receipt.kind || '').toLowerCase();
       merchantEl.value = String(receipt.source || receipt.merchant || '').trim();
       const total = Number(receipt.amount != null ? receipt.amount : receipt.total) || 0;
       totalEl.value = total ? String(total) : '';
@@ -3843,7 +3870,9 @@ input[type="date"]::-webkit-calendar-picker-indicator {
       currencyEl2.value = ccy;
       receiptDate = String(receipt.date || '').trim();
 
-      fillAccounts();
+      const isBalance = receiptKind === 'balance';
+      if (accountLabel) accountLabel.textContent = isBalance ? 'Set balance of' : 'Deduct from';
+      fillAccounts(isBalance, merchantEl.value.trim());
 
       // Line items, best effort. The API returns items as { name, amount };
       // older responses used { name, price }.
@@ -3896,24 +3925,45 @@ input[type="date"]::-webkit-calendar-picker-indicator {
       if (applyBtn.disabled) return;
       const total = parseTotal();
       if (!(total > 0)) { refreshHint(); return; }
+      const rate = exchangeRates[currencyEl2.value] || 1;
+      const totalCHF = total / rate;
+      const isBalance = receiptKind === 'balance';
+
+      // Balance + "New account": create a bank account holding this balance.
+      if (isBalance && accountEl.value === '__new__') {
+        const nm = merchantEl.value.trim() || 'Account';
+        const list = storeGet('nw:bank') || [];
+        list.push({ name: nm, amount: totalCHF });
+        storeSet('nw:bank', list);
+        logActivity('bank', nm, totalCHF, 'add');
+        renderAllNetWorth();
+        reset();
+        return;
+      }
+
       const v = accountEl.value;
       const ix = v.indexOf('::');
-      if (ix < 0) { showError('Pick an account to deduct from.'); return; }
+      if (ix < 0) { showError(isBalance ? 'Pick an account to set.' : 'Pick an account to deduct from.'); return; }
       const cat = v.slice(0, ix);
       const name = v.slice(ix + 2);
       const items = storeGet('nw:' + cat) || [];
       const idx = items.findIndex(it => String(it.name) === name);
-      if (idx < 0) { fillAccounts(); refreshHint(); showError('That account no longer exists — pick another.'); return; }
+      if (idx < 0) { fillAccounts(isBalance, merchantEl.value.trim()); refreshHint(); showError('That account no longer exists — pick another.'); return; }
 
-      const rate = exchangeRates[currencyEl2.value] || 1;
-      const totalCHF = total / rate;
       const cur = Number(items[idx].amount) || 0;
-      if (totalCHF > cur + 0.005) {
-        if (!confirm(name + " doesn't have enough — deduct anyway? (it will go negative)")) return;
+      if (isBalance) {
+        // The figure is the account's current balance — set it, log the change.
+        items[idx].amount = totalCHF;
+        storeSet('nw:' + cat, items);
+        logActivity(cat, name, totalCHF - cur, 'edit');
+      } else {
+        if (totalCHF > cur + 0.005) {
+          if (!confirm(name + " doesn't have enough — deduct anyway? (it will go negative)")) return;
+        }
+        items[idx].amount = cur - totalCHF;
+        storeSet('nw:' + cat, items);
+        logActivity(cat, merchantEl.value.trim() || 'Receipt', -totalCHF, 'edit');
       }
-      items[idx].amount = cur - totalCHF;
-      storeSet('nw:' + cat, items);
-      logActivity(cat, merchantEl.value.trim() || 'Receipt', -totalCHF, 'edit');
       renderAllNetWorth();
       reset();
     }
@@ -3951,6 +4001,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
     });
 
     totalEl.addEventListener('input', refreshHint);
+    merchantEl.addEventListener('input', refreshHint);
     currencyEl2.addEventListener('change', refreshHint);
     accountEl.addEventListener('change', refreshHint);
     applyBtn.addEventListener('click', apply);
