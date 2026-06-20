@@ -70,7 +70,7 @@ ${JSON.stringify(finance)}`;
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-opus-4-8',
+        model: 'claude-4-5-haiku-latest',
         max_tokens: 1024,
         system,
         messages,
